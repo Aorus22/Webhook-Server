@@ -4,6 +4,8 @@ use std::env;
 use std::process::Command;
 use std::path::Path;
 use dotenv::dotenv;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 #[derive(Deserialize)]
 struct DeployRequest {
@@ -30,12 +32,18 @@ async fn deploy_service(service_name: &str) -> Result<String, String> {
 }
 
 #[post("/deploy/{service_name}")]
-async fn deploy(service_name: web::Path<String>, req: web::Json<DeployRequest>) -> impl Responder {
+async fn deploy(
+    service_name: web::Path<String>,
+    req: web::Json<DeployRequest>,
+    lock: web::Data<Arc<Mutex<()>>>
+) -> impl Responder {
     let webhook_secret = env::var("WEBHOOK_SECRET").expect("WEBHOOK_SECRET must be set in .env!");
 
     if req.secret != webhook_secret {
         return HttpResponse::Forbidden().json(serde_json::json!({ "error": "Unauthorized" }));
     }
+
+    let _guard = lock.lock().await;
 
     match deploy_service(&service_name).await {
         Ok(message) => HttpResponse::Ok().json(serde_json::json!({ "status": message })),
@@ -53,8 +61,11 @@ async fn hello_world() -> impl Responder {
 async fn main() -> std::io::Result<()> {
     dotenv().ok();
 
-    HttpServer::new(|| {
+    let deploy_lock = Arc::new(Mutex::new(()));
+
+    HttpServer::new(move || {
         App::new()
+            .app_data(web::Data::new(deploy_lock.clone()))
             .service(deploy)
             .service(hello_world)
     })
